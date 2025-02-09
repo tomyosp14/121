@@ -150,6 +150,18 @@ func (client *HTTPClient) doWithRetry(req *http.Request, body interface{}) (*htt
 		resp, err = client.limit.GateReq(httpClient, req, bodyData)
 		if err == nil && resp.StatusCode >= 100 && resp.StatusCode < 500 {
 			return resp, nil
+     andyw8/fix-handling-of-nil-resp
+		} else if err, ok := err.(net.Error); ok && err.Timeout() {
+			attempt++
+			if attempt > client.maxRetry {
+				return resp, fmt.Errorf("request timed out after %v retries, there may be an issue with your connection", client.maxRetry)
+			}
+			time.Sleep(time.Duration(attempt) * time.Second)
+		} else if err == nil && resp.StatusCode == http.StatusTooManyRequests {
+			after, _ := strconv.ParseFloat(resp.Header.Get("Retry-After"), 10)
+			client.limit.ResetAfter(time.Duration(after))
+=======
+       main
 		} else if err != nil && strings.Contains(err.Error(), "no such host") {
 			return nil, ErrConnectionIssue
 		}
