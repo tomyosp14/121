@@ -105,7 +105,7 @@ func TestClient_do(t *testing.T) {
 		if request == 0 {
 			request++
 			mut.Unlock()
-			time.Sleep(time.Second)
+			time.Sleep(5 * time.Millisecond)
 		} else {
 			mut.Unlock()
 		}
@@ -113,7 +113,7 @@ func TestClient_do(t *testing.T) {
 
 	client, _ = NewClient(Params{
 		Domain:  server.URL,
-		Timeout: time.Millisecond,
+		Timeout: 5 * time.Millisecond,
 	})
 	client.baseURL.Scheme = "http"
 
@@ -130,7 +130,7 @@ func TestClient_do(t *testing.T) {
 
 	client, _ = NewClient(Params{
 		Domain:  server.URL,
-		Timeout: time.Millisecond,
+		Timeout: 5 * time.Millisecond,
 	})
 	client.maxRetry = 1
 	client.baseURL.Scheme = "http"
@@ -139,37 +139,85 @@ func TestClient_do(t *testing.T) {
 	assert.Nil(t, err)
 
 	_, err = client.do("POST", "/assets.json", body, nil)
-	assert.EqualError(t, err, "request timed out after 1 retries, there may be an issue with your connection")
+	assert.Contains(t, err.Error(), "request failed after 1 retries", server.URL)
+	server.Close()
+
+	// Client should query Theme Access server instead of Shopify when password starts with a prefix "shptka_"
+	shopifyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+
+	themeKitAccessServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, r.Header.Get("X-Shopify-Shop"), client.domain)
+	}))
+
+	client, err = NewClient(Params{
+		Domain:   shopifyServer.URL,
+		Password: "shptka_00000000000000000000000000000000",
+	})
+	themeKitAccessURL = themeKitAccessServer.URL
+
+	assert.NotNil(t, client)
+	assert.Nil(t, err)
+
+	resp, err = client.Post("/assets.json", body, map[string]string{"X-Custom-Header": "Checksum"})
+	assert.Nil(t, err)
+	assert.NotNil(t, resp)
+
+	server.Close()
+
+	// Client should query Shopify instead of Theme Access server when password has no specified prefix
+	shopifyServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Empty(t, r.Header.Get("X-Shopify-Shop"))
+	}))
+
+	themeKitAccessServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+
+	client, err = NewClient(Params{
+		Domain:   shopifyServer.URL,
+		Password: "secret_password",
+	})
+	themeKitAccessURL = themeKitAccessServer.URL
+
+	assert.NotNil(t, client)
+	assert.Nil(t, err)
+
+	resp, err = client.Post("/assets.json", body, map[string]string{"X-Custom-Header": "Checksum"})
+	assert.Nil(t, err)
+	assert.NotNil(t, resp)
+
 	server.Close()
 }
 
 func TestGenerateHTTPAdapter(t *testing.T) {
-	_, err := generateHTTPAdapter(time.Second, "#$#$^$%^##$")
-	if assert.NotNil(t, err) {
-		assert.EqualError(t, err, "invalid proxy URI")
-	}
+	NewClient(Params{
+		Domain:  "https://shop.myshopify.com",
+		Timeout: 60 * time.Second,
+	})
+	assert.Equal(t, httpClient.Timeout, 60*time.Second)
 
-	c, err := generateHTTPAdapter(time.Second, "http://localhost:3000")
-	assert.Nil(t, err)
-	assert.Equal(t, time.Second, c.Timeout)
-	assert.NotNil(t, c.Transport)
+	NewClient(Params{Domain: "https://shop.myshopify.com"})
+	assert.Equal(t, httpClient.Timeout, 60*time.Second)
 }
 
-func TestGenerateClientTransport(t *testing.T) {
+func TestProxyConfig(t *testing.T) {
 	testcases := []struct {
 		proxyURL, err string
-		expectNil     bool
 	}{
-		{proxyURL: "", expectNil: true},
-		{proxyURL: "http//localhost:3000", expectNil: true, err: "invalid proxy URI"},
-		{proxyURL: "http://127.0.0.1:8080", expectNil: false},
+		{proxyURL: ""},
+		{proxyURL: "http//localhost:3000", err: "invalid proxy URI"},
+		{proxyURL: "http://127.0.0.1:8080"},
 	}
 
 	for _, testcase := range testcases {
-		transport, err := generateClientTransport(testcase.proxyURL)
-		assert.Equal(t, transport == nil, testcase.expectNil)
-		if testcase.err == "" {
-			assert.Nil(t, err)
+		_, err := NewClient(Params{
+			Domain: "https://shop.myshopify.com",
+			Proxy:  testcase.proxyURL,
+		})
+		if testcase.err == "" && assert.Nil(t, err) {
+			if testcase.proxyURL == "" {
+				assert.Nil(t, httpTransport.Proxy)
+			} else {
+				assert.NotNil(t, httpTransport.Proxy)
+			}
 		} else if assert.NotNil(t, err) {
 			assert.Contains(t, err.Error(), testcase.err)
 		}

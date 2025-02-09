@@ -1,11 +1,8 @@
 package shopify
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"sort"
@@ -24,8 +21,6 @@ var (
 	ErrCriticalFile = errors.New("this file is critical and removing it would cause your theme to become non-functional")
 	// ErrNotPartOfTheme will be returned when trying to alter a filepath that does not exist in the theme
 	ErrNotPartOfTheme = errors.New("this file is not part of your theme")
-	// ErrMalformedResponse will be returned if we could not unmarshal the response from shopify
-	ErrMalformedResponse = errors.New("received a malformed response from shopify, this usually indicates a problem with your connection")
 	// ErrZipPathRequired is returned if a source path was not provided to create a new theme
 	ErrZipPathRequired = errors.New("theme zip path is required")
 	// ErrInfoWithoutThemeID will be returned if GetInfo is called without a theme ID
@@ -76,10 +71,6 @@ type assetResponse struct {
 
 type assetsResponse struct {
 	Assets []Asset `json:"assets"`
-}
-
-type reqErr struct {
-	Errors string `json:"errors"`
 }
 
 type httpAdapter interface {
@@ -133,7 +124,7 @@ func (c Client) GetShop() (Shop, error) {
 	}
 
 	var shop Shop
-	if err := unmarshalResponse(resp.Body, &shop); err != nil {
+	if err := unmarshalResponse(resp, &shop); err != nil {
 		return Shop{}, err
 	}
 
@@ -142,13 +133,13 @@ func (c Client) GetShop() (Shop, error) {
 
 // Themes will return all the available themes on a domain.
 func (c Client) Themes() ([]Theme, error) {
-	resp, err := c.http.Get(APIPath + "themes.json", nil)
+	resp, err := c.http.Get(APIPath+"themes.json", nil)
 	if err != nil {
 		return []Theme{}, err
 	}
 
 	var r themesResponse
-	if err := unmarshalResponse(resp.Body, &r); err != nil {
+	if err := unmarshalResponse(resp, &r); err != nil {
 		return []Theme{}, err
 	}
 
@@ -162,13 +153,13 @@ func (c *Client) CreateNewTheme(name string) (theme Theme, err error) {
 		return Theme{}, ErrThemeNameRequired
 	}
 
-	resp, err := c.http.Post(APIPath + "themes.json", map[string]interface{}{"theme": Theme{Name: name}}, nil)
+	resp, err := c.http.Post(APIPath+"themes.json", map[string]interface{}{"theme": Theme{Name: name}}, nil)
 	if err != nil {
 		return Theme{}, err
 	}
 
 	var r themeResponse
-	if err = unmarshalResponse(resp.Body, &r); err != nil {
+	if err = unmarshalResponse(resp, &r); err != nil {
 		return Theme{}, err
 	}
 
@@ -186,7 +177,7 @@ func (c Client) GetInfo() (Theme, error) {
 		return Theme{}, ErrInfoWithoutThemeID
 	}
 
-	resp, err := c.http.Get(fmt.Sprintf(APIPath + "themes/%s.json", c.themeID), nil)
+	resp, err := c.http.Get(fmt.Sprintf(APIPath+"themes/%s.json", c.themeID), nil)
 	if err != nil {
 		return Theme{}, err
 	} else if resp.StatusCode == 404 {
@@ -194,7 +185,7 @@ func (c Client) GetInfo() (Theme, error) {
 	}
 
 	var r themeResponse
-	if err := unmarshalResponse(resp.Body, &r); err != nil {
+	if err := unmarshalResponse(resp, &r); err != nil {
 		return Theme{}, err
 	}
 
@@ -208,7 +199,7 @@ func (c Client) PublishTheme() error {
 	}
 
 	resp, err := c.http.Put(
-		fmt.Sprintf(APIPath + "themes/%s.json", c.themeID),
+		fmt.Sprintf(APIPath+"themes/%s.json", c.themeID),
 		map[string]Theme{"theme": {Role: "main"}},
 		nil,
 	)
@@ -219,7 +210,7 @@ func (c Client) PublishTheme() error {
 	}
 
 	var r themeResponse
-	if err = unmarshalResponse(resp.Body, &r); err != nil {
+	if err = unmarshalResponse(resp, &r); err != nil {
 		return err
 	}
 
@@ -243,7 +234,7 @@ func (c Client) GetAllAssets() ([]Asset, error) {
 	}
 
 	var r assetsResponse
-	if err := unmarshalResponse(resp.Body, &r); err != nil {
+	if err := unmarshalResponse(resp, &r); err != nil {
 		return []Asset{}, err
 	}
 
@@ -268,7 +259,7 @@ func (c Client) GetAsset(filename string) (Asset, error) {
 	}
 
 	var r assetResponse
-	if err := unmarshalResponse(resp.Body, &r); err != nil {
+	if err := unmarshalResponse(resp, &r); err != nil {
 		return Asset{}, err
 	}
 
@@ -298,7 +289,7 @@ func (c Client) UpdateAsset(asset Asset, lastKnownChecksum string) error {
 	}
 
 	var r assetResponse
-	if err := unmarshalResponse(resp.Body, &r); err != nil {
+	if err := unmarshalResponse(resp, &r); err != nil {
 		return err
 	}
 
@@ -333,7 +324,7 @@ func (c Client) DeleteAsset(asset Asset) error {
 	}
 
 	var r assetResponse
-	if err := unmarshalResponse(resp.Body, &r); err != nil {
+	if err := unmarshalResponse(resp, &r); err != nil {
 		return err
 	}
 
@@ -347,7 +338,7 @@ func (c Client) DeleteAsset(asset Asset) error {
 func (c Client) assetPath(query map[string]string) string {
 	formatted := APIPath + "assets.json"
 	if c.themeID != "" {
-		formatted = fmt.Sprintf(APIPath + "themes/%s/assets.json", c.themeID)
+		formatted = fmt.Sprintf(APIPath+"themes/%s/assets.json", c.themeID)
 	}
 
 	if len(query) > 0 {
@@ -359,27 +350,6 @@ func (c Client) assetPath(query map[string]string) string {
 	}
 
 	return formatted
-}
-
-func unmarshalResponse(body io.ReadCloser, data interface{}) error {
-	reqBody, err := ioutil.ReadAll(body)
-	if err != nil {
-		return ErrMalformedResponse
-	}
-	err = body.Close()
-	if err != nil {
-		return err
-	}
-	var re reqErr
-	mainErr := json.Unmarshal(reqBody, data)
-	basicErr := json.Unmarshal(reqBody, &re)
-	if mainErr != nil && basicErr != nil {
-		return ErrMalformedResponse
-	}
-	if len(re.Errors) > 0 {
-		return errors.New(re.Errors)
-	}
-	return nil
 }
 
 func toMessages(a map[string][]string) []string {

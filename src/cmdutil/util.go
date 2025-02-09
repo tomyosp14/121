@@ -3,7 +3,6 @@ package cmdutil
 import (
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"strings"
@@ -17,43 +16,48 @@ import (
 
 	"github.com/Shopify/themekit/src/colors"
 	"github.com/Shopify/themekit/src/env"
+	"github.com/Shopify/themekit/src/file"
 	"github.com/Shopify/themekit/src/shopify"
 )
 
 // ErrReload is an error to return from a command if you want to reload and run again
 var (
-	ErrReload    = errors.New("reloading config")
-	ErrLiveTheme = errors.New("cannot make changes to a live theme without an override")
+	ErrReload        = errors.New("reloading config")
+	ErrLiveTheme     = errors.New("cannot make changes to a live theme without an override")
+	ErrDuringRuntime = errors.New("finished command with errors")
 )
 
 // Flags encapsulates all the possible flags that can be set in the themekit
 // command line. Some of the values are used across different commands
 type Flags struct {
-	ConfigPath            string
-	VariableFilePath      string
-	Environments          []string
-	Directory             string
-	Password              string
-	ThemeID               string
-	Domain                string
-	Proxy                 string
-	Timeout               time.Duration
-	Verbose               bool
-	DisableUpdateNotifier bool
-	IgnoredFiles          []string
-	Ignores               []string
-	DisableIgnore         bool
-	Notify                string
-	AllEnvs               bool
-	Version               string
-	Prefix                string
-	URL                   string
-	Name                  string
-	Edit                  bool
-	With                  string
-	List                  bool
-	NoDelete              bool
-	AllowLive             bool
+	ConfigPath                    string
+	VariableFilePath              string
+	Environments                  []string
+	Directory                     string
+	Password                      string
+	ThemeID                       string
+	Domain                        string
+	Proxy                         string
+	Timeout                       time.Duration
+	Verbose                       bool
+	DisableUpdateNotifier         bool
+	IgnoredFiles                  []string
+	Ignores                       []string
+	DisableIgnore                 bool
+	Notify                        string
+	AllEnvs                       bool
+	Version                       string
+	Prefix                        string
+	URL                           string
+	Name                          string
+	Edit                          bool
+	With                          string
+	List                          bool
+	NoDelete                      bool
+	AllowLive                     bool
+	Live                          bool
+	HidePreviewBar                bool
+	DisableThemeKitAccessNotifier bool
 }
 
 // Ctx is a specific context that a command will run in
@@ -66,15 +70,15 @@ type Ctx struct {
 	Args     []string
 	Log      *log.Logger
 	ErrLog   *log.Logger
-	errBuff  []string
 	progress *mpb.Progress
 	Bar      *mpb.Bar
 	mu       sync.RWMutex
+	summary  cmdSummary
 }
 
 type clientFact func(*env.Env) (shopifyClient, error)
 
-func createCtx(newClient clientFact, conf env.Conf, e *env.Env, flags Flags, args []string, progress *mpb.Progress, setTheme bool) (*Ctx, error) {
+func createCtx(newClient clientFact, conf env.Conf, e *env.Env, flags Flags, args []string, progress *mpb.Progress) (*Ctx, error) {
 	if e.Proxy != "" {
 		colors.ColorStdOut.Printf(
 			"[%s] Proxy URL detected from Configuration [%s] SSL Certificate Validation will be disabled!",
@@ -110,25 +114,23 @@ func createCtx(newClient clientFact, conf env.Conf, e *env.Env, flags Flags, arg
 		return &Ctx{}, err
 	}
 
-	if setTheme {
-		for _, theme := range themes {
-			if theme.Role == "main" {
-				if fmt.Sprintf("%v", theme.ID) == e.ThemeID && flags.AllowLive {
-					colors.ColorStdOut.Printf(
-						"[%s] Warning, this is the live theme on %s.",
-						colors.Yellow(e.Name),
-						colors.Yellow(shop.Name),
-					)
-				} else if fmt.Sprintf("%v", theme.ID) == e.ThemeID && !flags.AllowLive {
-					colors.ColorStdOut.Printf(
-						"[%s] This is the live theme on %s. If you wish to make changes to it, then you will have to pass the --allow-live flag",
-						colors.Red(e.Name),
-						colors.Yellow(shop.Name),
-					)
-					return &Ctx{}, ErrLiveTheme
-				}
-				break
+	for _, theme := range themes {
+		if theme.Role == "main" {
+			if fmt.Sprintf("%v", theme.ID) == e.ThemeID && flags.AllowLive {
+				colors.ColorStdOut.Printf(
+					"[%s] Warning, this is the live theme on %s.",
+					colors.Yellow(e.Name),
+					colors.Yellow(shop.Name),
+				)
+			} else if fmt.Sprintf("%v", theme.ID) == e.ThemeID && !flags.AllowLive {
+				colors.ColorStdOut.Printf(
+					"[%s] This is the live theme on %s. If you wish to make changes to it, then you will have to pass the --allow-live flag",
+					colors.Red(e.Name),
+					colors.Yellow(shop.Name),
+				)
+				return &Ctx{}, ErrLiveTheme
 			}
+			break
 		}
 	}
 
@@ -142,7 +144,7 @@ func createCtx(newClient clientFact, conf env.Conf, e *env.Env, flags Flags, arg
 		progress: progress,
 		Log:      colors.ColorStdOut,
 		ErrLog:   colors.ColorStdErr,
-		errBuff:  []string{},
+		summary:  cmdSummary{},
 	}, nil
 }
 
@@ -150,17 +152,8 @@ func createCtx(newClient clientFact, conf env.Conf, e *env.Env, flags Flags, arg
 // total amount of tasks as the count
 func (ctx *Ctx) StartProgress(count int) {
 	if !ctx.Flags.Verbose && ctx.progress != nil {
-		barErrors := func(w io.Writer, completed bool) {
-			ctx.mu.RLock()
-			defer ctx.mu.RUnlock()
-			for _, msg := range ctx.errBuff {
-				io.WriteString(w, msg+"\r\n")
-			}
-		}
-
 		ctx.Bar = ctx.progress.AddBar(
 			int64(count),
-			mpb.BarNewLineExtend(barErrors),
 			mpb.PrependDecorators(decor.Name(fmt.Sprintf("[%s] ", ctx.Env.Name)), decor.Counters(0, "%d|%d")),
 			mpb.AppendDecorators(decor.Percentage(decor.WCSyncSpace)),
 		)
@@ -169,21 +162,27 @@ func (ctx *Ctx) StartProgress(count int) {
 
 // Err acts like Printf but will display error messages better
 func (ctx *Ctx) Err(msg string, inter ...interface{}) {
-	if ctx.progress != nil && ctx.Bar != nil {
-		ctx.mu.Lock()
-		defer ctx.mu.Unlock()
-		ctx.errBuff = append(ctx.errBuff, fmt.Sprintf(msg, inter...))
-	} else {
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
+	ctx.summary.err(fmt.Sprintf(msg, inter...))
+	if ctx.progress == nil || ctx.Bar == nil {
 		ctx.ErrLog.Printf(msg, inter...)
 	}
 }
 
 // DoneTask will mark one unit of work complete. If the context has a progress bar
 // then it will increment it.
-func (ctx *Ctx) DoneTask() {
+func (ctx *Ctx) DoneTask(op file.Op) {
 	if !ctx.Flags.Verbose && ctx.Bar != nil {
 		ctx.Bar.Increment()
 	}
+	ctx.summary.completeOp(op)
+}
+
+// DisableSummary will ensure that the file operation summary will not output at
+// the end of the operation
+func (ctx *Ctx) DisableSummary() {
+	ctx.summary.disable()
 }
 
 func generateContexts(newClient clientFact, progress *mpb.Progress, flags Flags, args []string) ([]*Ctx, error) {
@@ -215,7 +214,7 @@ func generateContexts(newClient clientFact, progress *mpb.Progress, flags Flags,
 			}
 		}
 
-		ctx, err := createCtx(newClient, config, e, flags, args, progress, true)
+		ctx, err := createCtx(newClient, config, e, flags, args, progress)
 		if err != nil {
 			return ctxs, err
 		}
@@ -294,11 +293,13 @@ func forEachClient(newClient clientFact, flags Flags, args []string, handler fun
 	if err == ErrReload {
 		return forEachClient(newClient, flags, args, handler)
 	}
+	hasErrors := false
 	for _, ctx := range ctxs {
-		if len(ctx.errBuff) > 0 {
-			ctx.ErrLog.Println("finished command with errors")
-			break
-		}
+		ctx.summary.display(ctx)
+		hasErrors = hasErrors || ctx.summary.hasErrors()
+	}
+	if err == nil && hasErrors {
+		return ErrDuringRuntime
 	}
 	return err
 }
@@ -325,8 +326,9 @@ func forSingleClient(newClient clientFact, flags Flags, args []string, handler f
 	if err == ErrReload {
 		return forSingleClient(newClient, flags, args, handler)
 	}
-	if len(ctxs[0].errBuff) > 0 {
-		ctxs[0].ErrLog.Println("finished command with errors")
+	ctxs[0].summary.display(ctxs[0])
+	if err == nil && ctxs[0].summary.hasErrors() {
+		return ErrDuringRuntime
 	}
 	return err
 }
@@ -339,6 +341,11 @@ func ForDefaultClient(flags Flags, args []string, handler func(*Ctx) error) erro
 
 func forDefaultClient(newClient clientFact, flags Flags, args []string, handler func(*Ctx) error) error {
 	progressBarGroup := mpb.New(nil)
+
+	if err := env.SourceVariables(flags.VariableFilePath); err != nil {
+		return err
+	}
+
 	config, err := env.Load(flags.ConfigPath)
 	if err != nil && os.IsNotExist(err) {
 		config = env.New(flags.ConfigPath)
@@ -360,7 +367,7 @@ func forDefaultClient(newClient clientFact, flags Flags, args []string, handler 
 		}
 	}
 
-	ctx, err := createCtx(newClient, config, e, flags, args, progressBarGroup, false)
+	ctx, err := createCtx(newClient, config, e, flags, args, progressBarGroup)
 	if err != nil {
 		return err
 	}
@@ -369,9 +376,13 @@ func forDefaultClient(newClient clientFact, flags Flags, args []string, handler 
 	if err == nil {
 		progressBarGroup.Wait()
 	}
-	if len(ctx.errBuff) > 0 {
-		ctx.ErrLog.Println("finished command with errors")
+
+	ctx.summary.display(ctx)
+
+	if err == nil && ctx.summary.hasErrors() {
+		return ErrDuringRuntime
 	}
+
 	return err
 }
 

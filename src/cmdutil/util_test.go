@@ -11,6 +11,7 @@ import (
 
 	"github.com/Shopify/themekit/src/cmdutil/_mocks"
 	"github.com/Shopify/themekit/src/env"
+	"github.com/Shopify/themekit/src/file"
 	"github.com/Shopify/themekit/src/shopify"
 )
 
@@ -19,7 +20,7 @@ func TestCreateCtx(t *testing.T) {
 	client := new(mocks.ShopifyClient)
 	factory := func(*env.Env) (shopifyClient, error) { return client, nil }
 	client.On("GetShop").Return(shopify.Shop{}, shopify.ErrShopDomainNotFound)
-	_, err := createCtx(factory, env.Conf{}, e, Flags{}, []string{}, nil, false)
+	_, err := createCtx(factory, env.Conf{}, e, Flags{}, []string{}, nil)
 	if assert.NotNil(t, err) {
 		assert.Contains(t, err.Error(), "invalid domain")
 	}
@@ -28,7 +29,7 @@ func TestCreateCtx(t *testing.T) {
 	client = new(mocks.ShopifyClient)
 	factory = func(*env.Env) (shopifyClient, error) { return client, nil }
 	client.On("GetShop").Return(shopify.Shop{}, fmt.Errorf("This is bad"))
-	_, err = createCtx(factory, env.Conf{}, e, Flags{}, []string{}, nil, false)
+	_, err = createCtx(factory, env.Conf{}, e, Flags{}, []string{}, nil)
 	if assert.NotNil(t, err) {
 		assert.Contains(t, err.Error(), "This is bad")
 	}
@@ -37,7 +38,7 @@ func TestCreateCtx(t *testing.T) {
 	client.On("GetShop").Return(shopify.Shop{}, nil)
 	client.On("Themes").Return([]shopify.Theme{}, nil)
 	badFactory := func(*env.Env) (shopifyClient, error) { return nil, fmt.Errorf("no such file or directory") }
-	_, err = createCtx(badFactory, env.Conf{}, &env.Env{}, Flags{}, []string{}, nil, true)
+	_, err = createCtx(badFactory, env.Conf{}, &env.Env{}, Flags{}, []string{}, nil)
 	if assert.NotNil(t, err) {
 		assert.Contains(t, err.Error(), "no such file or directory")
 	}
@@ -45,7 +46,7 @@ func TestCreateCtx(t *testing.T) {
 	client = new(mocks.ShopifyClient)
 	client.On("GetShop").Return(shopify.Shop{}, nil)
 	client.On("Themes").Return([]shopify.Theme{}, fmt.Errorf("[API] Invalid API key or access token (unrecognized login or wrong password)"))
-	_, err = createCtx(factory, env.Conf{}, &env.Env{}, Flags{}, []string{}, nil, true)
+	_, err = createCtx(factory, env.Conf{}, &env.Env{}, Flags{}, []string{}, nil)
 	if assert.NotNil(t, err) {
 		assert.Contains(t, err.Error(), "[API] Invalid API key or access token (unrecognized login or wrong password)")
 	}
@@ -54,7 +55,7 @@ func TestCreateCtx(t *testing.T) {
 	client = new(mocks.ShopifyClient)
 	client.On("GetShop").Return(shopify.Shop{}, nil)
 	client.On("Themes").Return([]shopify.Theme{{ID: 65443, Role: "unpublished"}, {ID: 1234, Role: "main"}}, nil)
-	_, err = createCtx(factory, env.Conf{}, e, Flags{DisableIgnore: true}, []string{}, nil, true)
+	_, err = createCtx(factory, env.Conf{}, e, Flags{DisableIgnore: true}, []string{}, nil)
 	assert.Equal(t, ErrLiveTheme, err)
 	assert.Equal(t, e.ThemeID, "1234")
 }
@@ -79,17 +80,19 @@ func TestCtx_Err(t *testing.T) {
 	assert.NotNil(t, ctx.Bar)
 
 	ctx.Err("[%s] this is err", "production")
-	assert.Equal(t, ctx.errBuff[0], "[production] this is err")
+	assert.Equal(t, ctx.summary.errors[1], "[production] this is err")
 	assert.NotContains(t, stdErr.String(), "[production] this is err")
 }
 
 func TestCtx_DoneTask(t *testing.T) {
 	ctx := Ctx{Env: &env.Env{}, Flags: Flags{}, progress: mpb.New(nil)}
-	assert.NotPanics(t, ctx.DoneTask)
+	assert.NotPanics(t, func() {
+		ctx.DoneTask(file.Update)
+	})
 	ctx.StartProgress(6)
 	assert.NotNil(t, ctx.Bar)
 	assert.Equal(t, ctx.Bar.Current(), int64(0))
-	ctx.DoneTask()
+	ctx.DoneTask(file.Update)
 	assert.Equal(t, ctx.Bar.Current(), int64(1))
 }
 
@@ -226,15 +229,16 @@ func TestForEachClient(t *testing.T) {
 		ctx.ErrLog = log.New(stdErr, "", 0)
 		ctx.StartProgress(1)
 		ctx.Err("oopsy")
-		ctx.DoneTask()
+		ctx.DoneTask(file.Skip)
 		return nil
 	}
 	client = new(mocks.ShopifyClient)
 	factory = func(*env.Env) (shopifyClient, error) { return client, nil }
 	client.On("GetShop").Return(shopify.Shop{}, nil)
 	client.On("Themes").Return([]shopify.Theme{}, nil)
-	forEachClient(factory, Flags{Environments: []string{"development"}, ConfigPath: "_testdata/config.yml"}, []string{}, handler)
-	assert.Contains(t, stdErr.String(), "finished command with errors")
+	err = forEachClient(factory, Flags{Environments: []string{"development"}, ConfigPath: "_testdata/config.yml"}, []string{}, handler)
+	assert.Equal(t, ErrDuringRuntime, err)
+	assert.Contains(t, stdErr.String(), "Errors encountered: ")
 }
 
 func TestForSingleClient(t *testing.T) {
@@ -284,15 +288,16 @@ func TestForSingleClient(t *testing.T) {
 		ctx.ErrLog = log.New(stdErr, "", 0)
 		ctx.StartProgress(1)
 		ctx.Err("oopsy")
-		ctx.DoneTask()
+		ctx.DoneTask(file.Skip)
 		return nil
 	}
 	client = new(mocks.ShopifyClient)
 	factory = func(*env.Env) (shopifyClient, error) { return client, nil }
 	client.On("GetShop").Return(shopify.Shop{}, nil)
 	client.On("Themes").Return([]shopify.Theme{}, nil)
-	forSingleClient(factory, Flags{Environments: []string{"development"}, ConfigPath: "_testdata/config.yml"}, []string{}, handler)
-	assert.Contains(t, stdErr.String(), "finished command with errors")
+	err = forSingleClient(factory, Flags{Environments: []string{"development"}, ConfigPath: "_testdata/config.yml"}, []string{}, handler)
+	assert.Equal(t, ErrDuringRuntime, err)
+	assert.Contains(t, stdErr.String(), "Errors encountered")
 }
 
 func TestForDefaultClient(t *testing.T) {
@@ -335,7 +340,7 @@ func TestForDefaultClient(t *testing.T) {
 		ctx.ErrLog = log.New(stdErr, "", 0)
 		ctx.StartProgress(1)
 		ctx.Err("oopsy")
-		ctx.DoneTask()
+		ctx.DoneTask(file.Skip)
 		return nil
 	}
 	client = new(mocks.ShopifyClient)
@@ -343,5 +348,6 @@ func TestForDefaultClient(t *testing.T) {
 	client.On("GetShop").Return(shopify.Shop{}, nil)
 	client.On("Themes").Return([]shopify.Theme{}, nil)
 	forDefaultClient(factory, Flags{ConfigPath: "_testdata/config.yml"}, []string{}, handler)
-	assert.Contains(t, stdErr.String(), "finished command with errors")
+	assert.Equal(t, gandalfErr, err)
+	assert.Contains(t, stdErr.String(), "Errors encountered: ")
 }

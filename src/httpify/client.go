@@ -1,27 +1,37 @@
 package httpify
 
 import (
-	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
-	"net"
 	"net/http"
 	"net/url"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Shopify/themekit/src/ratelimiter"
 	"github.com/Shopify/themekit/src/release"
+	"github.com/Shopify/themekit/src/util"
 )
 
 var (
-	errConnectionIssue = errors.New("DNS problem while connecting to Shopify, this indicates a problem with your internet connection")
+	// ErrConnectionIssue is an error that is thrown when a very specific error is
+	// returned from our http request that usually implies bad connections.
+	ErrConnectionIssue = errors.New("DNS problem while connecting to Shopify, this indicates a problem with your internet connection")
+	// ErrInvalidProxyURL is returned if a proxy url has been passed but is improperly formatted
+	ErrInvalidProxyURL = errors.New("invalid proxy URI")
+	httpTransport      = &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	httpClient = &http.Client{
+		Timeout: 30 * time.Second,
+	}
+	themeKitAccessURL = "https://theme-kit-access.shopifyapps.com/cli"
 )
+
+type proxyHandler func(*http.Request) (*url.URL, error)
 
 // Params allows for a better structured input into NewClient
 type Params struct {
@@ -37,7 +47,6 @@ type HTTPClient struct {
 	domain   string
 	password string
 	baseURL  *url.URL
-	client   *http.Client
 	limit    *ratelimiter.Limiter
 	maxRetry int
 }
@@ -50,16 +59,23 @@ func NewClient(params Params) (*HTTPClient, error) {
 		return nil, err
 	}
 
-	adapter, err := generateHTTPAdapter(params.Timeout, params.Proxy)
-	if err != nil {
-		return nil, err
+	if params.Timeout != 0 {
+		httpClient.Timeout = params.Timeout
+	}
+
+	if params.Proxy != "" {
+		parsedURL, err := url.ParseRequestURI(params.Proxy)
+		if err != nil {
+			return nil, ErrInvalidProxyURL
+		}
+		httpTransport.Proxy = http.ProxyURL(parsedURL)
+		httpClient.Transport = httpTransport
 	}
 
 	return &HTTPClient{
 		domain:   params.Domain,
 		password: params.Password,
 		baseURL:  baseURL,
-		client:   adapter,
 		limit:    ratelimiter.New(params.Domain, 4),
 		maxRetry: 5,
 	}, nil
@@ -89,7 +105,15 @@ func (client *HTTPClient) Delete(path string, headers map[string]string) (*http.
 
 // do will issue an authenticated json request to shopify.
 func (client *HTTPClient) do(method, path string, body interface{}, headers map[string]string) (*http.Response, error) {
-	req, err := http.NewRequest(method, client.baseURL.String()+path, nil)
+	appBaseURL := client.baseURL.String()
+
+	// redirect to Theme Access
+	if util.IsThemeAccessPassword(client.password) {
+		appBaseURL = themeKitAccessURL
+	}
+
+	req, err := http.NewRequest(method, appBaseURL+path, nil)
+
 	if err != nil {
 		return nil, err
 	}
@@ -98,6 +122,9 @@ func (client *HTTPClient) do(method, path string, body interface{}, headers map[
 	req.Header.Add("Content-Type", "application/json")
 	req.Header.Add("Accept", "application/json")
 	req.Header.Add("User-Agent", fmt.Sprintf("go/themekit (%s; %s; %s)", runtime.GOOS, runtime.GOARCH, release.ThemeKitVersion.String()))
+	if util.IsThemeAccessPassword(client.password) {
+		req.Header.Add("X-Shopify-Shop", client.domain)
+	}
 	for label, value := range headers {
 		req.Header.Add(label, value)
 	}
@@ -106,21 +133,24 @@ func (client *HTTPClient) do(method, path string, body interface{}, headers map[
 }
 
 func (client *HTTPClient) doWithRetry(req *http.Request, body interface{}) (*http.Response, error) {
-	attempt := 0
-	for {
-		// reset the body when non-nil for every request (rewind)
-		if body != nil {
-			data, err := json.Marshal(body)
-			if err != nil {
-				return nil, err
-			}
-			req.Body = ioutil.NopCloser(bytes.NewBuffer(data))
-		}
+	var (
+		bodyData []byte
+		resp     *http.Response
+		err      error
+	)
 
-		client.limit.Wait()
-		resp, err := client.client.Do(req)
-		if err == nil && resp.StatusCode >= 100 && resp.StatusCode <= 428 {
+	if body != nil {
+		bodyData, err = json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	for attempt := 0; attempt <= client.maxRetry; attempt++ {
+		resp, err = client.limit.GateReq(httpClient, req, bodyData)
+		if err == nil && resp.StatusCode >= 100 && resp.StatusCode < 500 {
 			return resp, nil
+     andyw8/fix-handling-of-nil-resp
 		} else if err, ok := err.(net.Error); ok && err.Timeout() {
 			attempt++
 			if attempt > client.maxRetry {
@@ -130,36 +160,15 @@ func (client *HTTPClient) doWithRetry(req *http.Request, body interface{}) (*htt
 		} else if err == nil && resp.StatusCode == http.StatusTooManyRequests {
 			after, _ := strconv.ParseFloat(resp.Header.Get("Retry-After"), 10)
 			client.limit.ResetAfter(time.Duration(after))
+=======
+       main
 		} else if err != nil && strings.Contains(err.Error(), "no such host") {
-			return nil, errConnectionIssue
+			return nil, ErrConnectionIssue
 		}
-	}
-}
-
-func generateHTTPAdapter(timeout time.Duration, proxyURL string) (*http.Client, error) {
-	adapter := &http.Client{Timeout: timeout}
-	if transport, err := generateClientTransport(proxyURL); err != nil {
-		return nil, err
-	} else if transport != nil {
-		adapter.Transport = transport
-	}
-	return adapter, nil
-}
-
-func generateClientTransport(proxyURL string) (*http.Transport, error) {
-	if proxyURL == "" {
-		return nil, nil
+		time.Sleep(time.Duration(attempt) * time.Second)
 	}
 
-	parsedURL, err := url.ParseRequestURI(proxyURL)
-	if err != nil {
-		return nil, fmt.Errorf("invalid proxy URI")
-	}
-
-	return &http.Transport{
-		Proxy:           http.ProxyURL(parsedURL),
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}, nil
+	return nil, fmt.Errorf("request failed after %v retries with error: %v", client.maxRetry, err)
 }
 
 func parseBaseURL(domain string) (*url.URL, error) {

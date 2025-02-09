@@ -11,10 +11,11 @@ import (
 	"github.com/Shopify/themekit/src/colors"
 	"github.com/Shopify/themekit/src/env"
 	"github.com/Shopify/themekit/src/release"
+	"github.com/Shopify/themekit/src/util"
 )
 
 const afterUpdateMessage = `Successfully updated to theme kit version %v, for more information on this release please see the change log
-	https://github.com/Shopify/themekit/blob/master/changelog.txt
+	https://github.com/Shopify/themekit/blob/main/changelog.txt
 
 If you have troubles with this release please report them to
 	https://github.com/Shopify/themekit/issues
@@ -34,13 +35,25 @@ var (
 
 Theme Kit is a fast and cross platform tool that enables you to build shopify themes with ease.
 
-Complete documentation is available at https://shopify.github.io/themekit/`,
+Complete documentation is available at https://shopify.dev/tools/theme-kit.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			if !flags.DisableUpdateNotifier && release.IsUpdateAvailable() {
 				colors.ColorStdOut.Print(colors.Yellow("An update for Themekit is available. To update please run `theme update`"))
 			}
+		},
+		PersistentPostRun: func(cmd *cobra.Command, args []string) {
+			// env validation requires a theme id. setting a dummy one here if not provided
+			if flags.ThemeID == "" {
+				flags.ThemeID = "1337"
+			}
+			cmdutil.ForDefaultClient(flags, args, func(ctx *cmdutil.Ctx) error {
+				if !flags.DisableThemeKitAccessNotifier && !util.IsThemeAccessPassword(ctx.Env.Password) {
+					colors.ColorStdOut.Print(colors.Yellow("* Build themes without private apps. Learn more about the Theme Access app: https://shopify.dev/themes/tools/theme-access"))
+				}
+				return nil
+			})
 		},
 	}
 
@@ -49,7 +62,7 @@ Complete documentation is available at https://shopify.github.io/themekit/`,
 		Short: "Update Theme kit to the newest version.",
 		Long: `Update will check for a new release, then if there is an applicable update it will download it and apply it.
 
- For more documentation please see http://shopify.github.io/themekit/commands/#update
+ For more information, refer to https://shopify.dev/tools/theme-kit/troubleshooting.
  `,
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			colors.ColorStdOut.Printf("Updating from %s to %s", colors.Yellow(release.ThemeKitVersion), colors.Yellow(flags.Version))
@@ -89,6 +102,7 @@ func init() {
 	ThemeCmd.PersistentFlags().StringArrayVar(&flags.Ignores, "ignores", []string{}, "A path to a file that contains ignore patterns.")
 	ThemeCmd.PersistentFlags().BoolVar(&flags.DisableIgnore, "no-ignore", false, "Will disable config ignores so that all files can be changed")
 	ThemeCmd.PersistentFlags().BoolVar(&flags.AllowLive, "allow-live", false, "Will allow themekit to make changes to the live theme on the store.")
+	ThemeCmd.PersistentFlags().BoolVarP(&flags.DisableThemeKitAccessNotifier, "no-theme-kit-access-notifier", "", false, "Stop theme kit from notifying about Theme Access.")
 
 	watchCmd.Flags().StringVarP(&flags.Notify, "notify", "n", "", "file to touch or url to notify when a file has been changed")
 	watchCmd.Flags().BoolVarP(&flags.AllEnvs, "allenvs", "a", false, "run command with all environments")
@@ -102,6 +116,23 @@ func init() {
 	openCmd.Flags().StringVarP(&flags.With, "browser", "b", "", "name of the browser to open the url. the name should match the name of browser on your system.")
 	getCmd.Flags().BoolVarP(&flags.List, "list", "l", false, "list available themes.")
 	deployCmd.Flags().BoolVarP(&flags.NoDelete, "nodelete", "n", false, "do not delete files on shopify during deploy.")
+	openCmd.Flags().BoolVar(&flags.HidePreviewBar, "hidepb", false, "run command with all environments")
 
-	ThemeCmd.AddCommand(publishCmd, openCmd, versionCmd, newCmd, configureCmd, downloadCmd, removeCmd, updateCmd, watchCmd, getCmd, deployCmd)
+	getCmd.Flags().BoolVar(&flags.Live, "live", false, "will allow themekit to autofill the theme ID as the currently published theme ID")
+	downloadCmd.Flags().BoolVar(&flags.Live, "live", false, "will allow themekit to autofill the theme ID as the currently published theme ID")
+	configureCmd.Flags().BoolVar(&flags.Live, "live", false, "will allow themekit to autofill the theme ID as the currently published theme ID")
+
+	ThemeCmd.AddCommand(
+		configureCmd,
+		deployCmd,
+		downloadCmd,
+		getCmd,
+		newCmd,
+		openCmd,
+		publishCmd,
+		removeCmd,
+		updateCmd,
+		versionCmd,
+		watchCmd,
+	)
 }

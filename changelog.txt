@@ -1,3 +1,52 @@
+v1.3.2 (March 18, 2024)
+=====================
+- Upgrade Go to 1.22.1 https://github.com/Shopify/themekit/pull/1009
+
+v1.3.1 (Dec 12, 2022)
+=====================
+- Rename Theme Kit Access references to Theme Access https://github.com/Shopify/themekit/pull/984
+
+v1.3.0 (Jun 23, 2021)
+=====================
+- Add messaging for Theme Access https://github.com/Shopify/themekit/pull/939
+
+v1.2.0 (May 27, 2021)
+=====================
+- Add support for Theme Access https://github.com/Shopify/themekit/pull/933
+
+v1.1.6 (Feb 3, 2021)
+=====================
+- Allow theme get and theme new to use env vars https://github.com/Shopify/themekit/pull/891
+- Fixed errors from directory changes in theme watch https://github.com/Shopify/themekit/pull/889
+
+v1.1.5 (Jan 21, 2021)
+=====================
+- Fix layout after renaming application.scss.css to application.css
+- Added more to customer templates
+- Optimization for watcher to reduce CPU usage.
+
+v1.1.4 (Dec 3, 2020)
+====================
+- Fix for theme get --list (#862)
+- Removed too restrictive timeouts (#864)
+- Allow watch command to be cancelled while working on events (#865)
+
+v1.1.3 (Dec 2, 2020)
+====================
+- Added an error summary (#826)
+- Added error count to action summary (#826)
+- Set status error codes when errors occur for better scriptability (#826)
+- Added --live flag to get, download, configure to automatically set
+configuration to the published theme
+- Added --hidepb flag to hide preview bar (#829)
+- Improved request throttling and retrying, to eliminate ABS interactions and
+hanging operations (#839)
+- Adding more feedback when having issues unmarshalling responses (#840)
+
+v1.1.2 (Sep 29, 2020)
+=====================
+- Fix hanging uploads (#809)
+
 v1.1.1 (Sep 1, 2020)
 ====================
 - Fix so that `theme new` doesn't require a theme ID. (#767)

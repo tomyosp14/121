@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/Shopify/themekit/src/env"
@@ -23,7 +22,8 @@ const (
 	Remove
 	// Skip is a file op where the remote file matches the local file so is not transferred
 	Skip
-	filepathSplit = " -> "
+	// Get is when a file should be re-fetched, used in download operations
+	Get
 )
 
 var (
@@ -65,8 +65,14 @@ func NewWatcher(e *env.Env, configPath string, checksums map[string]string) (*Wa
 	}
 	fsWatcher.AddFilterHook(hook)
 
-	if err := fsWatcher.AddRecursive(e.Directory); err != nil {
+	if err := fsWatcher.Add(e.Directory); err != nil {
 		return nil, fmt.Errorf("Could not watch directory: %s", err)
+	}
+	for _, folder := range assetLocations {
+		path := filepath.Join(e.Directory, folder)
+		if err := fsWatcher.Add(path); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("Could not watch directory %s: %s", path, err)
+		}
 	}
 
 	return &Watcher{
@@ -83,7 +89,7 @@ func filterHook(e *env.Env, configPath string) (watcher.FilterFileHookFunc, erro
 		return nil, err
 	}
 	return func(info os.FileInfo, fullPath string) error {
-		if info.IsDir() || (configPath != fullPath && filter.Match(fullPath)) {
+		if configPath != fullPath && filter.Match(fullPath) {
 			return watcher.ErrSkip
 		}
 		return nil
@@ -107,15 +113,23 @@ func (w *Watcher) watchFsEvents() {
 		case <-w.fsWatcher.Closed:
 			w.Stop()
 			return
+		case <-w.fsWatcher.Error:
+			// discard errors, they are not useful for users and the watcher deadlocks
+			// if they are not read. The expected errors come from a directory being
+			// deleted while being watched
 		}
 	}
 }
 
 func (w *Watcher) onEvent(event watcher.Event) bool {
 	events := map[string]Event{}
-	for _, event := range w.translateEvent(event) {
-		events[event.Path] = event
+	for _, e := range w.translateEvent(event) {
+		events[e.Path] = e
 	}
+	if len(events) == 0 {
+		return false
+	}
+
 	drainTimer := time.NewTimer(drainTimeout)
 	defer drainTimer.Stop()
 	for {
@@ -147,8 +161,12 @@ func (w *Watcher) updateChecksum(e Event) {
 }
 
 func (w *Watcher) translateEvent(event watcher.Event) []Event {
-	oldPath, currentPath := w.parsePath(event.Path)
-	if isEventType(event.Op, watcher.Rename, watcher.Move) {
+	oldPath, currentPath := w.parsePath(event.OldPath), w.parsePath(event.Path)
+	if event.IsDir() {
+		if isEventType(event.Op, watcher.Create) {
+			w.fsWatcher.Add(event.Path)
+		}
+	} else if isEventType(event.Op, watcher.Rename, watcher.Move) {
 		return []Event{{Op: Remove, Path: oldPath}, {Op: Update, Path: currentPath, LastKnownChecksum: w.checksums[currentPath]}}
 	} else if isEventType(event.Op, watcher.Remove) {
 		return []Event{{Op: Remove, Path: currentPath}}
@@ -163,19 +181,12 @@ func (w *Watcher) translateEvent(event watcher.Event) []Event {
 	return []Event{}
 }
 
-func (w *Watcher) parsePath(path string) (old, current string) {
-	parts := strings.Split(path, filepathSplit)
-	for i, path := range parts {
-		projectPath := pathToProject(w.directory, path)
-		if projectPath == "" {
-			projectPath = path
-		}
-		parts[i] = projectPath
+func (w *Watcher) parsePath(path string) string {
+	projectPath := pathToProject(w.directory, path)
+	if projectPath == "" {
+		return path
 	}
-	if len(parts) > 1 {
-		return parts[0], parts[1]
-	}
-	return "", parts[0]
+	return projectPath
 }
 
 func isEventType(currentOp watcher.Op, allowedOps ...watcher.Op) bool {
